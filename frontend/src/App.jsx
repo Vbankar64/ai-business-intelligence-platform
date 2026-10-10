@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
 
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -9,485 +9,666 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
+).replace(/\/$/, "");
+
+const ENDPOINTS = [
+  { key: "dashboard", name: "Dashboard", path: "/dashboard" },
+  { key: "analytics", name: "Analytics", path: "/analytics" },
+  { key: "customers", name: "Customers", path: "/customers" },
+  { key: "sales", name: "Sales", path: "/sales" },
+  { key: "products", name: "Products", path: "/products" },
+  { key: "aiInsights", name: "AI Insights", path: "/ai-insights" },
+];
+
+const NAV_ITEMS = [
+  "Dashboard",
+  "Analytics",
+  "Customers",
+  "Sales",
+  "Products",
+  "AI Insights",
+  "Settings",
+  "Logout",
+];
+
+const EMPTY_DATA = {
+  dashboard: {},
+  analytics: {},
+  customers: {},
+  sales: {},
+  products: {},
+  aiInsights: {},
+};
 
 async function fetchJson(endpoint) {
-  const url = `${API_URL}${endpoint}`;
+  let response;
 
   try {
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(
-        `${endpoint} returned ${response.status} ${response.statusText}`
-      );
-    }
-
-    return await response.json();
+    response = await fetch(`${API_URL}${endpoint}`);
   } catch (error) {
-    console.error(`API Error: ${endpoint}`, error);
-
     throw new Error(
-      `${endpoint}: ${error.message || "Unable to fetch data"}`
+      `Cannot reach ${API_URL}. Check that the backend is running and CORS is configured.`
     );
   }
+
+  if (!response.ok) {
+    let detail = "";
+
+    try {
+      const body = await response.json();
+      detail = body.detail
+        ? ` — ${typeof body.detail === "string"
+            ? body.detail
+            : JSON.stringify(body.detail)}`
+        : "";
+    } catch {
+      // The response may not contain JSON.
+    }
+
+    throw new Error(
+      `${endpoint} returned ${response.status} ${response.statusText}${detail}`
+    );
+  }
+
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(`${endpoint} returned an invalid JSON response.`);
+  }
+}
+
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function getList(data, ...keys) {
+  if (Array.isArray(data)) return data;
+
+  for (const key of keys) {
+    if (Array.isArray(data?.[key])) return data[key];
+  }
+
+  return [];
+}
+
+function toNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") {
+    return fallback;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function firstNumber(values, fallback = 0) {
+  for (const value of values) {
+    if (value !== null && value !== undefined && value !== "") {
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+  }
+
+  return fallback;
 }
 
 function formatCurrency(value) {
-  const number = Number(value || 0);
-  return `₹${number.toLocaleString("en-IN")}`;
+  return `₹${toNumber(value).toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 function formatNumber(value) {
-  const number = Number(value || 0);
-  return number.toLocaleString("en-IN");
+  return toNumber(value).toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+  });
 }
 
 function formatPercentage(value) {
-  return `${Number(value || 0).toFixed(1)}%`;
+  return `${toNumber(value).toFixed(1)}%`;
+}
+
+function getStatus(status) {
+  const value = String(status || "Unknown").toLowerCase();
+
+  if (["completed", "complete", "delivered", "success"].includes(value)) {
+    return "completed";
+  }
+
+  if (["pending", "processing", "in progress"].includes(value)) {
+    return "pending";
+  }
+
+  if (["cancelled", "canceled", "failed"].includes(value)) {
+    return "cancelled";
+  }
+
+  return "";
 }
 
 function getStatusClass(status) {
-  if (!status) return "status";
+  const statusClass = getStatus(status);
+  return statusClass ? `status ${statusClass}` : "status";
+}
 
-  const normalizedStatus = String(status).toLowerCase();
+function getCustomerName(customer) {
+  return (
+    customer?.name ||
+    customer?.customer_name ||
+    customer?.customer ||
+    "Unknown Customer"
+  );
+}
 
-  if (normalizedStatus === "completed") {
-    return "status completed";
+function getProductName(product) {
+  return (
+    product?.name ||
+    product?.product_name ||
+    product?.product ||
+    "Unknown Product"
+  );
+}
+
+function getOrderCustomer(order) {
+  if (typeof order?.customer === "object" && order.customer !== null) {
+    return getCustomerName(order.customer);
   }
 
-  if (normalizedStatus === "pending") {
-    return "status pending";
+  return order?.customer_name || order?.customer || "Unknown Customer";
+}
+
+function getOrderProduct(order) {
+  if (typeof order?.product === "object" && order.product !== null) {
+    return getProductName(order.product);
   }
 
-  if (normalizedStatus === "cancelled") {
-    return "status cancelled";
+  return order?.product_name || order?.product || "Unknown Product";
+}
+
+function getOrderAmount(order) {
+  return firstNumber([
+    order?.amount,
+    order?.total_amount,
+    order?.total,
+    order?.revenue,
+    order?.price,
+  ]);
+}
+
+function getOrderDate(order) {
+  const value = order?.order_date || order?.date || order?.created_at;
+
+  if (!value) return "N/A";
+
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime())
+    ? "N/A"
+    : date.toLocaleDateString("en-IN");
+}
+
+function isCompleted(order) {
+  return getStatus(order?.status) === "completed";
+}
+
+function isPending(order) {
+  return getStatus(order?.status) === "pending";
+}
+
+function isCancelled(order) {
+  return getStatus(order?.status) === "cancelled";
+}
+
+function StatCard({ label, value, description }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-card-accent" />
+      <div className="stat-card-content">
+        <span className="stat-label">{label}</span>
+        <h2>{value}</h2>
+        <p>{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function SummaryRow({ label, value }) {
+  return (
+    <div className="summary-row">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function InsightCard({ title, children }) {
+  return (
+    <div className="ai-insight-card">
+      <h3>{title}</h3>
+      <p>{children}</p>
+    </div>
+  );
+}
+
+function PageHeader({ title, description }) {
+  return (
+    <div className="page-header">
+      <div>
+        <h1>{title}</h1>
+        <p>{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function DataTable({ columns, rows, emptyMessage = "No data available." }) {
+  if (!rows.length) {
+    return <div className="empty-state">{emptyMessage}</div>;
   }
 
-  return "status";
+  return (
+    <div className="table-container">
+      <table>
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column.key}>{column.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={row.id ?? row.order_id ?? row.product_id ?? index}>
+              {columns.map((column) => (
+                <td key={column.key}>
+                  {column.render
+                    ? column.render(row, index)
+                    : row[column.key] ?? "N/A"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RevenueChart({ data, height = 320 }) {
+  if (!data.length) {
+    return <div className="empty-state">No revenue data available.</div>;
+  }
+
+  return (
+    <div className="revenue-chart">
+      <ResponsiveContainer width="100%" height={height}>
+        <LineChart
+          data={data}
+          margin={{ top: 10, right: 20, left: 10, bottom: 5 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="month" />
+          <YAxis
+            tickFormatter={(value) =>
+              `₹${Number(value).toLocaleString("en-IN")}`
+            }
+          />
+          <Tooltip formatter={(value) => formatCurrency(value)} />
+          <Line
+            type="monotone"
+            dataKey="revenue"
+            name="Revenue"
+            stroke="#2563eb"
+            strokeWidth={3}
+            dot={{ r: 4 }}
+            activeDot={{ r: 6 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
 }
 
 function App() {
   const [activePage, setActivePage] = useState("Dashboard");
-
-  const [dashboard, setDashboard] = useState({});
-  const [analytics, setAnalytics] = useState({});
-  const [customers, setCustomers] = useState({});
-  const [sales, setSales] = useState({});
-  const [products, setProducts] = useState({});
-  const [aiInsights, setAiInsights] = useState({});
-
+  const [data, setData] = useState(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
   const [apiErrors, setApiErrors] = useState([]);
+  const [backendConnected, setBackendConnected] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
 
-  useEffect(() => {
-    loadAllData();
-  }, []);
-
-  async function loadAllData() {
-    setLoading(true);
-    setError("");
+  const loadAllData = useCallback(async () => {
+    setRefreshing(true);
+    setConnectionError("");
     setApiErrors([]);
 
-    const endpoints = [
-      {
-        name: "Dashboard",
-        endpoint: "/dashboard",
-        setter: setDashboard,
-      },
-      {
-        name: "Analytics",
-        endpoint: "/analytics",
-        setter: setAnalytics,
-      },
-      {
-        name: "Customers",
-        endpoint: "/customers",
-        setter: setCustomers,
-      },
-      {
-        name: "Sales",
-        endpoint: "/sales",
-        setter: setSales,
-      },
-      {
-        name: "Products",
-        endpoint: "/products",
-        setter: setProducts,
-      },
-      {
-        name: "AI Insights",
-        endpoint: "/ai-insights",
-        setter: setAiInsights,
-      },
-    ];
-
-    const errors = [];
-
     try {
-      const healthResponse = await fetchJson("/health");
+      const health = await fetchJson("/health");
 
-      console.log("Backend health:", healthResponse);
-
-      if (healthResponse?.status !== "healthy") {
-        throw new Error("Backend health check did not return healthy.");
+      if (
+        health?.status &&
+        !["healthy", "ok"].includes(String(health.status).toLowerCase())
+      ) {
+        throw new Error(
+          `Backend health check returned status: ${health.status}`
+        );
       }
 
+      setBackendConnected(true);
+
       const results = await Promise.allSettled(
-        endpoints.map((item) => fetchJson(item.endpoint))
+        ENDPOINTS.map((item) => fetchJson(item.path))
       );
 
+      const nextData = { ...EMPTY_DATA };
+      const errors = [];
+
       results.forEach((result, index) => {
-        const item = endpoints[index];
+        const item = ENDPOINTS[index];
 
         if (result.status === "fulfilled") {
-          item.setter(result.value || {});
+          nextData[item.key] = result.value ?? {};
         } else {
-          const message =
-            result.reason?.message || `Unable to load ${item.name}`;
-
-          console.error(`${item.name} error:`, message);
-
-          errors.push(`${item.endpoint} → ${message}`);
+          errors.push({
+            name: item.name,
+            endpoint: item.path,
+            message:
+              result.reason?.message || "Unable to load this endpoint.",
+          });
         }
       });
 
-      if (errors.length > 0) {
-        setApiErrors(errors);
-      }
-    } catch (err) {
-      console.error("Backend health check failed:", err);
+      // Keep successful results, even when one endpoint fails.
+      setData((previous) => {
+        const merged = { ...previous };
 
-      setError(
-        err?.message || "Unable to connect to the FastAPI backend."
+        ENDPOINTS.forEach((item) => {
+          const resultIndex = ENDPOINTS.findIndex(
+            (endpoint) => endpoint.key === item.key
+          );
+
+          if (results[resultIndex].status === "fulfilled") {
+            merged[item.key] = nextData[item.key];
+          }
+        });
+
+        return merged;
+      });
+
+      setApiErrors(errors);
+      setLastUpdated(new Date());
+    } catch (error) {
+      console.error("Backend connection error:", error);
+      setBackendConnected(false);
+      setConnectionError(
+        error?.message || "Unable to connect to the backend."
       );
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }
+  }, []);
 
-  const revenueOverview = Array.isArray(dashboard.revenue_overview)
-    ? dashboard.revenue_overview
-    : [];
+  useEffect(() => {
+    loadAllData();
+  }, [loadAllData]);
 
-  const productList = Array.isArray(products.products)
-    ? products.products
-    : Array.isArray(products)
-      ? products
-      : [];
+  const dashboard = asObject(data.dashboard);
+  const analytics = asObject(data.analytics);
+  const customers = asObject(data.customers);
+  const sales = asObject(data.sales);
+  const products = asObject(data.products);
+  const aiInsights = asObject(data.aiInsights);
 
-  const customerList = Array.isArray(customers.customers)
-    ? customers.customers
-    : Array.isArray(customers)
-      ? customers
-      : [];
+  const customerList = getList(customers, "customers", "data", "items");
+  const productList = getList(products, "products", "data", "items");
+  const salesList = getList(sales, "orders", "sales", "transactions", "data", "items");
 
-  const salesList = Array.isArray(sales.orders)
-    ? sales.orders
-    : Array.isArray(sales.sales)
-      ? sales.sales
-      : Array.isArray(sales)
-        ? sales
-        : [];
-
-  const productPerformanceList = Array.isArray(
-    analytics.product_performance
-  )
-    ? analytics.product_performance
-    : Array.isArray(products.product_performance)
-      ? products.product_performance
-      : [];
-
-  const dashboardRevenue = Number(
-    dashboard.total_revenue ?? 0
+  const revenueOverview = getList(
+    dashboard,
+    "revenue_overview",
+    "monthly_revenue"
   );
 
-  const dashboardCustomers = Number(
-    dashboard.total_customers ?? customerList.length
+  const analyticsRevenueOverview = getList(
+    analytics,
+    "monthly_revenue",
+    "revenue_overview"
   );
 
-  const dashboardOrders = Number(
-    dashboard.total_orders ?? salesList.length
+  const chartData = analyticsRevenueOverview.length
+    ? analyticsRevenueOverview
+    : revenueOverview;
+
+  const productPerformanceList = getList(
+    analytics,
+    "product_performance",
+    "products"
   );
 
-  const dashboardConversion = Number(
-    dashboard.conversion_rate ?? 0
-  );
+  const completedOrders = salesList.filter(isCompleted);
+  const pendingOrders = salesList.filter(isPending);
+  const cancelledOrders = salesList.filter(isCancelled);
+
+  const dashboardRevenue = firstNumber([
+    dashboard.total_revenue,
+    analytics.total_revenue,
+    sales.total_revenue,
+  ]);
+
+  const dashboardCustomers = firstNumber([
+    dashboard.total_customers,
+    analytics.total_customers,
+    customers.total_customers,
+  ], customerList.length);
+
+  const dashboardOrders = firstNumber([
+    dashboard.total_orders,
+    analytics.total_orders,
+    sales.total_orders,
+    sales.total_sales_count,
+  ], salesList.length);
+
+  const dashboardConversion = firstNumber([
+    dashboard.conversion_rate,
+    analytics.conversion_rate,
+  ]);
+
+  const salesCompleted = firstNumber([
+    sales.completed_orders,
+    sales.completed,
+    sales.completed_sales,
+  ], completedOrders.length);
+
+  const salesPending = firstNumber([
+    sales.pending_orders,
+    sales.pending,
+    sales.pending_sales,
+  ], pendingOrders.length);
+
+  const salesCancelled = firstNumber([
+    sales.cancelled_orders,
+    sales.cancelled,
+    sales.cancelled_sales,
+  ], cancelledOrders.length);
+
+  const salesTotal = firstNumber([
+    sales.total_sales_value,
+    sales.total_revenue,
+    sales.sales_value,
+  ], salesList.reduce((total, sale) => total + getOrderAmount(sale), 0));
 
   const lowStockProducts = productList.filter(
-    (product) => Number(product.stock ?? 0) <= 10
+    (product) => toNumber(product.stock ?? product.quantity) <= 10
   );
 
-  const lowStockCount = Number(
-    dashboard.low_stock_count ??
-      products.low_stock_products ??
-      lowStockProducts.length
-  );
+  const lowStockCount = firstNumber([
+    dashboard.low_stock_count,
+    products.low_stock_count,
+  ], lowStockProducts.length);
 
   const totalInventory = productList.reduce(
     (total, product) =>
-      total + Number(product.stock ?? 0),
+      total + toNumber(product.stock ?? product.quantity),
     0
   );
 
   const healthyStockProducts = productList.filter(
-    (product) => Number(product.stock ?? 0) > 10
+    (product) => toNumber(product.stock ?? product.quantity) > 10
   ).length;
 
   const calculatedInventoryValue = productList.reduce(
-    (total, product) => {
-      const price = Number(product.price ?? 0);
-      const stock = Number(product.stock ?? 0);
-
-      return total + price * stock;
-    },
+    (total, product) =>
+      total +
+      toNumber(product.price ?? product.unit_price) *
+        toNumber(product.stock ?? product.quantity),
     0
   );
 
-  const inventoryValue = Number(
-    products.inventory_value ??
-      products.total_inventory_value ??
-      calculatedInventoryValue
-  );
+  const inventoryValue = firstNumber([
+    products.inventory_value,
+    products.total_inventory_value,
+    dashboard.inventory_value,
+  ], calculatedInventoryValue);
 
-  const salesTotal = Number(
-    sales.total_sales ??
-      sales.total_orders ??
-      salesList.length ??
-      0
-  );
+  const averageOrderValue = firstNumber([
+    analytics.average_order_value,
+    analytics.aov,
+    dashboard.average_order_value,
+  ], salesCompleted > 0 ? dashboardRevenue / salesCompleted : 0);
 
-  const salesCompleted = Number(
-    sales.completed_orders ??
-      sales.completed ??
-      sales.completed_sales ??
-      salesList.filter(
-        (sale) =>
-          String(sale.status || "").toLowerCase() ===
-          "completed"
-      ).length
-  );
+  const aiSummary = asObject(aiInsights.summary);
 
-  const salesPending = Number(
-    sales.pending_orders ??
-      sales.pending ??
-      sales.pending_sales ??
-      salesList.filter(
-        (sale) =>
-          String(sale.status || "").toLowerCase() ===
-          "pending"
-      ).length
-  );
+  const aiPendingOrders = firstNumber([
+    aiSummary.pending_orders,
+    aiInsights.pending_orders,
+  ], salesPending);
 
-  const salesCancelled = Number(
-    sales.cancelled_orders ??
-      sales.cancelled ??
-      sales.cancelled_sales ??
-      salesList.filter(
-        (sale) =>
-          String(sale.status || "").toLowerCase() ===
-          "cancelled"
-      ).length
-  );
+  const aiCompletedOrders = firstNumber([
+    aiSummary.completed_orders,
+    aiInsights.completed_orders,
+  ], salesCompleted);
 
-  const calculatedAOV =
-    salesCompleted > 0
-      ? dashboardRevenue / salesCompleted
-      : 0;
-
-  const averageOrderValue = Number(
-    analytics.average_order_value ??
-      analytics.aov ??
-      calculatedAOV
-  );
-
-  const aiSummary = aiInsights.summary || {};
-
-  const aiPendingOrders = Number(
-    aiSummary.pending_orders ??
-      aiInsights.pending_orders ??
-      salesPending
-  );
-
-  const aiCompletedOrders = Number(
-    aiSummary.completed_orders ??
-      aiInsights.completed_orders ??
-      salesCompleted
-  );
-
-  const aiTotalOrders = Number(
-    aiSummary.total_orders ??
-      aiInsights.total_orders ??
-      dashboardOrders
-  );
+  const aiTotalOrders = firstNumber([
+    aiSummary.total_orders,
+    aiInsights.total_orders,
+  ], dashboardOrders);
 
   const aiCompletionRate =
-    aiTotalOrders > 0
-      ? (aiCompletedOrders / aiTotalOrders) * 100
-      : 0;
+    aiTotalOrders > 0 ? (aiCompletedOrders / aiTotalOrders) * 100 : 0;
 
-  function getCustomerName(customer) {
-    return (
-      customer?.name ||
-      customer?.customer_name ||
-      customer?.customer ||
-      "Unknown Customer"
-    );
-  }
+  const recentOrders = getList(dashboard, "recent_orders").length
+    ? getList(dashboard, "recent_orders")
+    : salesList.slice(0, 5);
 
-  function getProductName(product) {
-    return (
-      product?.name ||
-      product?.product_name ||
-      product?.product ||
-      "Unknown Product"
-    );
-  }
+  const backendInsights = getList(
+    aiInsights,
+    "insights",
+    "ai_insights",
+    "recommendations"
+  );
 
-  function getOrderCustomer(order) {
-    return (
-      order?.customer ||
-      order?.customer_name ||
-      "Unknown Customer"
-    );
-  }
+  const revenueHealth =
+    dashboardRevenue > 0
+      ? { className: "good", text: "Revenue Recorded" }
+      : { className: "warning", text: "No Revenue Recorded" };
 
-  function getOrderProduct(order) {
-    return (
-      order?.product ||
-      order?.product_name ||
-      "Unknown Product"
-    );
-  }
+  const inventoryHealth =
+    lowStockCount === 0
+      ? { className: "good", text: "Healthy" }
+      : lowStockCount <= 2
+        ? { className: "warning", text: "Monitor" }
+        : { className: "danger", text: "Needs Attention" };
 
-  function getRevenueHealth() {
-    if (dashboardRevenue > 0) {
-      return {
-        className: "good",
-        text: "Healthy",
-      };
-    }
+  const orderHealth =
+    salesPending === 0
+      ? { className: "good", text: "No Pending Orders" }
+      : { className: "warning", text: `${salesPending} Pending` };
 
-    return {
-      className: "danger",
-      text: "Needs Attention",
-    };
-  }
+  const completionHealth =
+    aiCompletionRate >= 70
+      ? { className: "good", text: "Strong" }
+      : aiCompletionRate >= 40
+        ? { className: "warning", text: "Moderate" }
+        : { className: "danger", text: "Low" };
 
-  function getInventoryHealth() {
-    if (lowStockCount === 0) {
-      return {
-        className: "good",
-        text: "Healthy",
-      };
-    }
-
-    if (lowStockCount <= 2) {
-      return {
-        className: "warning",
-        text: "Monitor",
-      };
-    }
-
-    return {
-      className: "danger",
-      text: "Needs Attention",
-    };
-  }
-
-  function getOrderHealth() {
-    if (salesPending === 0) {
-      return {
-        className: "good",
-        text: "Healthy",
-      };
-    }
-
-    return {
-      className: "warning",
-      text: `${salesPending} Pending`,
-    };
-  }
-
-  function getCompletionHealth() {
-    if (aiCompletionRate >= 70) {
-      return {
-        className: "good",
-        text: "Strong",
-      };
-    }
-
-    if (aiCompletionRate >= 40) {
-      return {
-        className: "warning",
-        text: "Moderate",
-      };
-    }
-
-    return {
-      className: "danger",
-      text: "Low",
-    };
-  }
+  const recentOrderColumns = [
+    {
+      key: "order_id",
+      label: "Order ID",
+      render: (row) => row.order_id || row.id || "N/A",
+    },
+    {
+      key: "customer",
+      label: "Customer",
+      render: (row) => getOrderCustomer(row),
+    },
+    {
+      key: "product",
+      label: "Product",
+      render: (row) => getOrderProduct(row),
+    },
+    {
+      key: "amount",
+      label: "Amount",
+      render: (row) => formatCurrency(getOrderAmount(row)),
+    },
+    {
+      key: "status",
+      label: "Status",
+      render: (row) => (
+        <span className={getStatusClass(row.status)}>
+          {row.status || "Unknown"}
+        </span>
+      ),
+    },
+    {
+      key: "order_date",
+      label: "Date",
+      render: (row) => getOrderDate(row),
+    },
+  ];
 
   function renderDashboard() {
-    const revenueHealth = getRevenueHealth();
-    const inventoryHealth = getInventoryHealth();
-    const orderHealth = getOrderHealth();
-    const completionHealth = getCompletionHealth();
-
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Business Dashboard</h1>
-            <p>
-              Monitor your business performance, revenue,
-              customers, sales and inventory.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Business Dashboard"
+          description="Monitor revenue, customers, sales, inventory, and business performance."
+        />
 
         <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Total Revenue</span>
-              <h2>{formatCurrency(dashboardRevenue)}</h2>
-              <p>Revenue from completed orders</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Total Customers</span>
-              <h2>{formatNumber(dashboardCustomers)}</h2>
-              <p>Registered customers</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Total Orders</span>
-              <h2>{formatNumber(dashboardOrders)}</h2>
-              <p>All recorded orders</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Conversion Rate</span>
-              <h2>{formatPercentage(dashboardConversion)}</h2>
-              <p>Completed orders ratio</p>
-            </div>
-          </div>
+          <StatCard
+            label="Total Revenue"
+            value={formatCurrency(dashboardRevenue)}
+            description="Revenue reported by the backend"
+          />
+          <StatCard
+            label="Total Customers"
+            value={formatNumber(dashboardCustomers)}
+            description="Registered customers"
+          />
+          <StatCard
+            label="Total Orders"
+            value={formatNumber(dashboardOrders)}
+            description="Recorded orders"
+          />
+          <StatCard
+            label="Conversion Rate"
+            value={formatPercentage(dashboardConversion)}
+            description="Backend-reported conversion rate"
+          />
         </div>
 
         <div className="revenue-section">
@@ -495,99 +676,25 @@ function App() {
             <div className="card-header">
               <div>
                 <h2>Monthly Revenue</h2>
-                <p>Revenue performance throughout the year</p>
+                <p>Revenue performance over time</p>
               </div>
             </div>
-
-            <div className="revenue-chart">
-              {revenueOverview.length > 0 ? (
-                <ResponsiveContainer width="100%" height={320}>
-                  <LineChart
-                    data={revenueOverview}
-                    margin={{
-                      top: 10,
-                      right: 20,
-                      left: 10,
-                      bottom: 5,
-                    }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-
-                    <XAxis dataKey="month" />
-
-                    <YAxis
-                      tickFormatter={(value) =>
-                        `₹${Number(value).toLocaleString("en-IN")}`
-                      }
-                    />
-
-                    <Tooltip
-                      formatter={(value) =>
-                        formatCurrency(value)
-                      }
-                    />
-
-                    <Line
-                      type="monotone"
-                      dataKey="revenue"
-                      stroke="#2563eb"
-                      strokeWidth={3}
-                      dot={{ r: 4 }}
-                      activeDot={{ r: 6 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="empty-state">
-                  No revenue data available.
-                </div>
-              )}
-            </div>
+            <RevenueChart data={chartData} />
           </div>
 
           <div className="revenue-summary-card">
             <div className="card-header">
               <div>
                 <h2>Revenue Performance</h2>
-                <p>Key revenue indicators</p>
+                <p>Key sales indicators</p>
               </div>
             </div>
-
             <div className="summary-list">
-              <div className="summary-row">
-                <span>Total Revenue</span>
-                <strong>
-                  {formatCurrency(dashboardRevenue)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Completed Orders</span>
-                <strong>
-                  {formatNumber(salesCompleted)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Pending Orders</span>
-                <strong>
-                  {formatNumber(salesPending)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Cancelled Orders</span>
-                <strong>
-                  {formatNumber(salesCancelled)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Avg. Completed Order</span>
-                <strong>
-                  {formatCurrency(averageOrderValue)}
-                </strong>
-              </div>
+              <SummaryRow label="Total Revenue" value={formatCurrency(dashboardRevenue)} />
+              <SummaryRow label="Completed Orders" value={formatNumber(salesCompleted)} />
+              <SummaryRow label="Pending Orders" value={formatNumber(salesPending)} />
+              <SummaryRow label="Cancelled Orders" value={formatNumber(salesCancelled)} />
+              <SummaryRow label="Average Order Value" value={formatCurrency(averageOrderValue)} />
             </div>
           </div>
         </div>
@@ -597,44 +704,29 @@ function App() {
             <div className="card-header">
               <div>
                 <h2>Inventory Intelligence</h2>
-                <p>Monitor products and stock levels</p>
+                <p>Current product and stock indicators</p>
               </div>
             </div>
-
             <div className="inventory-stats">
               <div className="inventory-stat">
                 <span>Total Products</span>
-                <strong>
-                  {formatNumber(productList.length)}
-                </strong>
+                <strong>{formatNumber(productList.length)}</strong>
               </div>
-
               <div className="inventory-stat">
-                <span>Total Inventory</span>
-                <strong>
-                  {formatNumber(totalInventory)}
-                </strong>
+                <span>Total Units</span>
+                <strong>{formatNumber(totalInventory)}</strong>
               </div>
-
               <div className="inventory-stat warning">
                 <span>Low Stock</span>
-                <strong>
-                  {formatNumber(lowStockCount)}
-                </strong>
+                <strong>{formatNumber(lowStockCount)}</strong>
               </div>
-
               <div className="inventory-stat healthy">
                 <span>Healthy Stock</span>
-                <strong>
-                  {formatNumber(healthyStockProducts)}
-                </strong>
+                <strong>{formatNumber(healthyStockProducts)}</strong>
               </div>
-
               <div className="inventory-stat">
                 <span>Inventory Value</span>
-                <strong>
-                  {formatCurrency(inventoryValue)}
-                </strong>
+                <strong>{formatCurrency(inventoryValue)}</strong>
               </div>
             </div>
           </div>
@@ -643,52 +735,36 @@ function App() {
             <div className="card-header">
               <div>
                 <h2>Low Stock Alerts</h2>
-                <p>Products that need attention</p>
+                <p>Products with 10 or fewer units</p>
               </div>
             </div>
 
-            {lowStockProducts.length > 0 ? (
+            {lowStockProducts.length ? (
               <div className="low-stock-list">
                 {lowStockProducts.map((product, index) => (
                   <div
                     className="low-stock-item"
-                    key={
-                      product.id ??
-                      product.product_id ??
-                      index
-                    }
+                    key={product.id ?? product.product_id ?? index}
                   >
                     <div className="low-stock-info">
                       <div className="low-stock-icon">!</div>
-
                       <div>
-                        <strong>
-                          {getProductName(product)}
-                        </strong>
-
+                        <strong>{getProductName(product)}</strong>
                         <span>
-                          {formatNumber(product.stock ?? 0)}{" "}
-                          units remaining
+                          {formatNumber(product.stock ?? product.quantity)} units remaining
                         </span>
                       </div>
                     </div>
-
                     <div className="low-stock-action">
-                      <span className="stock-warning">
-                        Low Stock
-                      </span>
+                      <span className="stock-warning">Low Stock</span>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
               <div className="inventory-success">
-                <strong>Inventory is healthy</strong>
-
-                <p>
-                  No products currently require immediate
-                  restocking.
-                </p>
+                <strong>No low-stock products detected</strong>
+                <p>Based on the currently loaded product data.</p>
               </div>
             )}
           </div>
@@ -699,54 +775,24 @@ function App() {
             <div className="card-header">
               <div>
                 <h2>Business Health</h2>
-                <p>Overall operational health</p>
+                <p>Indicators based on loaded data</p>
               </div>
             </div>
-
             <div className="business-health">
-              <div className="health-item">
-                <div className="health-item-left">
-                  <span
-                    className={`health-indicator ${revenueHealth.className}`}
-                  ></span>
-                  <span>Revenue Performance</span>
+              {[
+                ["Revenue Performance", revenueHealth],
+                ["Inventory", inventoryHealth],
+                ["Order Processing", orderHealth],
+                ["Order Completion", completionHealth],
+              ].map(([label, health]) => (
+                <div className="health-item" key={label}>
+                  <div className="health-item-left">
+                    <span className={`health-indicator ${health.className}`} />
+                    <span>{label}</span>
+                  </div>
+                  <strong>{health.text}</strong>
                 </div>
-
-                <strong>{revenueHealth.text}</strong>
-              </div>
-
-              <div className="health-item">
-                <div className="health-item-left">
-                  <span
-                    className={`health-indicator ${inventoryHealth.className}`}
-                  ></span>
-                  <span>Inventory</span>
-                </div>
-
-                <strong>{inventoryHealth.text}</strong>
-              </div>
-
-              <div className="health-item">
-                <div className="health-item-left">
-                  <span
-                    className={`health-indicator ${orderHealth.className}`}
-                  ></span>
-                  <span>Order Processing</span>
-                </div>
-
-                <strong>{orderHealth.text}</strong>
-              </div>
-
-              <div className="health-item">
-                <div className="health-item-left">
-                  <span
-                    className={`health-indicator ${completionHealth.className}`}
-                  ></span>
-                  <span>Order Completion</span>
-                </div>
-
-                <strong>{completionHealth.text}</strong>
-              </div>
+              ))}
             </div>
           </div>
 
@@ -757,42 +803,12 @@ function App() {
                 <p>Current business snapshot</p>
               </div>
             </div>
-
             <div className="summary-list">
-              <div className="summary-row">
-                <span>Customers</span>
-                <strong>
-                  {formatNumber(dashboardCustomers)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Orders</span>
-                <strong>
-                  {formatNumber(dashboardOrders)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Revenue</span>
-                <strong>
-                  {formatCurrency(dashboardRevenue)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Inventory Units</span>
-                <strong>
-                  {formatNumber(totalInventory)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Low Stock Products</span>
-                <strong>
-                  {formatNumber(lowStockCount)}
-                </strong>
-              </div>
+              <SummaryRow label="Customers" value={formatNumber(dashboardCustomers)} />
+              <SummaryRow label="Orders" value={formatNumber(dashboardOrders)} />
+              <SummaryRow label="Revenue" value={formatCurrency(dashboardRevenue)} />
+              <SummaryRow label="Inventory Units" value={formatNumber(totalInventory)} />
+              <SummaryRow label="Low Stock Products" value={formatNumber(lowStockCount)} />
             </div>
           </div>
         </div>
@@ -800,82 +816,28 @@ function App() {
         <div className="content-card">
           <div className="card-header">
             <div>
-              <h2>AI Business Insights</h2>
-              <p>
-                Data-driven insights generated from your
-                business information
-              </p>
+              <h2>Business Insights</h2>
+              <p>Rule-based observations derived from currently loaded metrics</p>
             </div>
           </div>
-
           <div className="ai-insights-grid">
-            <div className="ai-insight-card">
-              <h3>Revenue Insight</h3>
-              <p>
-                Your business has generated{" "}
-                <strong>
-                  {formatCurrency(dashboardRevenue)}
-                </strong>{" "}
-                in realized revenue from completed orders.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Order Performance</h3>
-              <p>
-                Out of{" "}
-                <strong>{formatNumber(aiTotalOrders)}</strong>{" "}
-                recorded orders,{" "}
-                <strong>
-                  {formatNumber(aiCompletedOrders)}
-                </strong>{" "}
-                have been completed.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Inventory Alert</h3>
-              <p>
-                {lowStockCount > 0
-                  ? `${lowStockCount} product(s) currently have low stock and may require restocking.`
-                  : "All products currently have healthy stock levels."}
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Conversion Insight</h3>
-              <p>
-                The current order completion rate is{" "}
-                <strong>
-                  {formatPercentage(aiCompletionRate)}
-                </strong>
-                . Improving pending orders could increase
-                realized revenue.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Pending Orders</h3>
-              <p>
-                There are{" "}
-                <strong>
-                  {formatNumber(aiPendingOrders)}
-                </strong>{" "}
-                pending order(s). Reviewing these orders may
-                help prevent revenue delays.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Inventory Value</h3>
-              <p>
-                Current estimated inventory value is{" "}
-                <strong>
-                  {formatCurrency(inventoryValue)}
-                </strong>
-                .
-              </p>
-            </div>
+            <InsightCard title="Revenue">
+              Reported revenue is {formatCurrency(dashboardRevenue)}.
+              Compare this figure across periods to identify growth or decline.
+            </InsightCard>
+            <InsightCard title="Order Completion">
+              {formatNumber(aiCompletedOrders)} of {formatNumber(aiTotalOrders)} recorded
+              orders are completed based on the available order data.
+            </InsightCard>
+            <InsightCard title="Inventory">
+              {lowStockCount > 0
+                ? `${formatNumber(lowStockCount)} product(s) may need restocking.`
+                : "No low-stock products were detected in the loaded data."}
+            </InsightCard>
+            <InsightCard title="Pending Orders">
+              {formatNumber(aiPendingOrders)} order(s) are pending. Review them to avoid
+              processing delays.
+            </InsightCard>
           </div>
         </div>
 
@@ -883,160 +845,52 @@ function App() {
           <div className="card-header">
             <div>
               <h2>Recent Orders</h2>
-              <p>Latest business transactions</p>
+              <p>Latest available business transactions</p>
             </div>
           </div>
-
-          {Array.isArray(dashboard.recent_orders) &&
-          dashboard.recent_orders.length > 0 ? (
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Order ID</th>
-                    <th>Customer</th>
-                    <th>Product</th>
-                    <th>Amount</th>
-                    <th>Status</th>
-                    <th>Date</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {dashboard.recent_orders.map(
-                    (order, index) => (
-                      <tr
-                        key={
-                          order.id ??
-                          order.order_id ??
-                          index
-                        }
-                      >
-                        <td>
-                          <strong>
-                            {order.order_id || "N/A"}
-                          </strong>
-                        </td>
-
-                        <td>{getOrderCustomer(order)}</td>
-
-                        <td>{getOrderProduct(order)}</td>
-
-                        <td>
-                          {formatCurrency(order.amount)}
-                        </td>
-
-                        <td>
-                          <span
-                            className={getStatusClass(
-                              order.status
-                            )}
-                          >
-                            {order.status || "Unknown"}
-                          </span>
-                        </td>
-
-                        <td>
-                          {order.order_date
-                            ? new Date(
-                                order.order_date
-                              ).toLocaleDateString("en-IN")
-                            : "N/A"}
-                        </td>
-                      </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="empty-state">
-              No recent orders available.
-            </div>
-          )}
+          <DataTable
+            columns={recentOrderColumns}
+            rows={recentOrders}
+            emptyMessage="No recent orders are available."
+          />
         </div>
       </div>
     );
   }
 
   function renderAnalytics() {
-    const analyticsRevenue = Number(
-      analytics.total_revenue ?? dashboardRevenue
-    );
+    const analyticsRevenue = firstNumber([
+      analytics.total_revenue,
+      dashboard.total_revenue,
+    ]);
 
-    const analyticsOrders = Number(
-      analytics.total_orders ?? dashboardOrders
-    );
+    const analyticsOrders = firstNumber([
+      analytics.total_orders,
+      dashboard.total_orders,
+    ], salesList.length);
 
-    const analyticsCustomers = Number(
-      analytics.total_customers ?? dashboardCustomers
-    );
+    const analyticsCustomers = firstNumber([
+      analytics.total_customers,
+      dashboard.total_customers,
+    ], customerList.length);
 
-    const analyticsAOV = Number(
-      analytics.average_order_value ??
-        analytics.aov ??
-        averageOrderValue
-    );
-
-    const analyticsRevenueOverview =
-      Array.isArray(analytics.monthly_revenue)
-        ? analytics.monthly_revenue
-        : revenueOverview;
+    const analyticsAOV = firstNumber([
+      analytics.average_order_value,
+      analytics.aov,
+    ], averageOrderValue);
 
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Analytics</h1>
-            <p>
-              Analyze your business performance and key
-              metrics.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Analytics"
+          description="Explore revenue trends and key business performance indicators."
+        />
 
         <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Revenue</span>
-              <h2>
-                {formatCurrency(analyticsRevenue)}
-              </h2>
-              <p>Total realized revenue</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Orders</span>
-              <h2>{formatNumber(analyticsOrders)}</h2>
-              <p>Total recorded orders</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Customers</span>
-              <h2>
-                {formatNumber(analyticsCustomers)}
-              </h2>
-              <p>Total customers</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Average Order
-              </span>
-              <h2>{formatCurrency(analyticsAOV)}</h2>
-              <p>Average completed order value</p>
-            </div>
-          </div>
+          <StatCard label="Revenue" value={formatCurrency(analyticsRevenue)} description="Reported revenue" />
+          <StatCard label="Orders" value={formatNumber(analyticsOrders)} description="Recorded orders" />
+          <StatCard label="Customers" value={formatNumber(analyticsCustomers)} description="Recorded customers" />
+          <StatCard label="Average Order Value" value={formatCurrency(analyticsAOV)} description="Backend value or calculated fallback" />
         </div>
 
         <div className="content-card">
@@ -1046,117 +900,47 @@ function App() {
               <p>Monthly revenue performance</p>
             </div>
           </div>
-
-          <div className="revenue-chart">
-            {analyticsRevenueOverview.length > 0 ? (
-              <ResponsiveContainer width="100%" height={360}>
-                <LineChart
-                  data={analyticsRevenueOverview}
-                  margin={{
-                    top: 10,
-                    right: 20,
-                    left: 10,
-                    bottom: 5,
-                  }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-
-                  <XAxis dataKey="month" />
-
-                  <YAxis
-                    tickFormatter={(value) =>
-                      `₹${Number(value).toLocaleString(
-                        "en-IN"
-                      )}`
-                    }
-                  />
-
-                  <Tooltip
-                    formatter={(value) =>
-                      formatCurrency(value)
-                    }
-                  />
-
-                  <Line
-                    type="monotone"
-                    dataKey="revenue"
-                    stroke="#2563eb"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="empty-state">
-                No analytics data available.
-              </div>
-            )}
-          </div>
+          <RevenueChart data={chartData} height={360} />
         </div>
 
         <div className="content-grid">
           <div className="content-card">
-            <div className="card-header">
-              <div>
-                <h2>Sales Performance</h2>
-              </div>
-            </div>
-
+            <div className="card-header"><h2>Sales Performance</h2></div>
             <div className="summary-list">
-              <div className="summary-row">
-                <span>Completed</span>
-                <strong>
-                  {formatNumber(salesCompleted)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Pending</span>
-                <strong>
-                  {formatNumber(salesPending)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Cancelled</span>
-                <strong>
-                  {formatNumber(salesCancelled)}
-                </strong>
-              </div>
+              <SummaryRow label="Completed Orders" value={formatNumber(salesCompleted)} />
+              <SummaryRow label="Pending Orders" value={formatNumber(salesPending)} />
+              <SummaryRow label="Cancelled Orders" value={formatNumber(salesCancelled)} />
+              <SummaryRow label="Sales Value" value={formatCurrency(salesTotal)} />
             </div>
           </div>
 
           <div className="content-card">
-            <div className="card-header">
-              <div>
-                <h2>Inventory Performance</h2>
-              </div>
-            </div>
-
+            <div className="card-header"><h2>Inventory Performance</h2></div>
             <div className="summary-list">
-              <div className="summary-row">
-                <span>Total Products</span>
-                <strong>
-                  {formatNumber(productList.length)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Total Units</span>
-                <strong>
-                  {formatNumber(totalInventory)}
-                </strong>
-              </div>
-
-              <div className="summary-row">
-                <span>Low Stock</span>
-                <strong>
-                  {formatNumber(lowStockCount)}
-                </strong>
-              </div>
+              <SummaryRow label="Products" value={formatNumber(productList.length)} />
+              <SummaryRow label="Total Units" value={formatNumber(totalInventory)} />
+              <SummaryRow label="Low Stock Products" value={formatNumber(lowStockCount)} />
+              <SummaryRow label="Inventory Value" value={formatCurrency(inventoryValue)} />
             </div>
           </div>
         </div>
+
+        {productPerformanceList.length > 0 && (
+          <div className="content-card">
+            <div className="card-header">
+              <div><h2>Product Performance</h2><p>Performance data returned by the backend</p></div>
+            </div>
+            <DataTable
+              rows={productPerformanceList}
+              columns={[
+                { key: "product", label: "Product", render: (row) => getProductName(row) },
+                { key: "sales", label: "Sales", render: (row) => formatNumber(row.sales ?? row.total_sales) },
+                { key: "revenue", label: "Revenue", render: (row) => formatCurrency(row.revenue ?? row.total_revenue) },
+                { key: "status", label: "Status", render: (row) => row.status || "N/A" },
+              ]}
+            />
+          </div>
+        )}
       </div>
     );
   }
@@ -1164,85 +948,26 @@ function App() {
   function renderCustomers() {
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Customers</h1>
-            <p>
-              View customer information and purchase
-              activity.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Customers"
+          description="Review customer information and purchase activity."
+        />
 
         <div className="content-card">
           <div className="card-header">
-            <div>
-              <h2>Customer List</h2>
-              <p>
-                {formatNumber(customerList.length)} customers
-              </p>
-            </div>
+            <div><h2>Customer List</h2><p>{formatNumber(customerList.length)} loaded customers</p></div>
           </div>
-
-          {customerList.length > 0 ? (
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Email</th>
-                    <th>Total Orders</th>
-                    <th>Total Spent</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {customerList.map(
-                    (customer, index) => (
-                      <tr
-                        key={customer.id ?? index}
-                      >
-                        <td>
-                          {customer.id ?? index + 1}
-                        </td>
-
-                        <td>
-                          <strong>
-                            {getCustomerName(customer)}
-                          </strong>
-                        </td>
-
-                        <td>
-                          {customer.email || "N/A"}
-                        </td>
-
-                        <td>
-                          {formatNumber(
-                            customer.total_orders ??
-                              customer.orders ??
-                              0
-                          )}
-                        </td>
-
-                        <td>
-                          {formatCurrency(
-                            customer.total_spent ??
-                              customer.spent ??
-                              0
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="empty-state">
-              No customers available.
-            </div>
-          )}
+          <DataTable
+            rows={customerList}
+            emptyMessage="No customers are available from the backend."
+            columns={[
+              { key: "id", label: "ID", render: (row, index) => row.id ?? row.customer_id ?? index + 1 },
+              { key: "name", label: "Name", render: (row) => <strong>{getCustomerName(row)}</strong> },
+              { key: "email", label: "Email", render: (row) => row.email || "N/A" },
+              { key: "orders", label: "Total Orders", render: (row) => formatNumber(row.total_orders ?? row.orders) },
+              { key: "spent", label: "Total Spent", render: (row) => formatCurrency(row.total_spent ?? row.spent) },
+            ]}
+          />
         </div>
       </div>
     );
@@ -1251,134 +976,27 @@ function App() {
   function renderSales() {
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Sales</h1>
-            <p>
-              Monitor sales transactions and order status.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Sales"
+          description="Monitor transactions, sales value, and order status."
+        />
 
         <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Total Sales</span>
-              <h2>{formatCurrency(salesTotal)}</h2>
-              <p>Total sales value</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Completed</span>
-              <h2>{formatNumber(salesCompleted)}</h2>
-              <p>Successfully completed</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Pending</span>
-              <h2>{formatNumber(salesPending)}</h2>
-              <p>Awaiting processing</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Cancelled</span>
-              <h2>{formatNumber(salesCancelled)}</h2>
-              <p>Cancelled transactions</p>
-            </div>
-          </div>
+          <StatCard label="Sales Value" value={formatCurrency(salesTotal)} description="Reported or calculated transaction value" />
+          <StatCard label="Completed" value={formatNumber(salesCompleted)} description="Completed orders" />
+          <StatCard label="Pending" value={formatNumber(salesPending)} description="Orders awaiting processing" />
+          <StatCard label="Cancelled" value={formatNumber(salesCancelled)} description="Cancelled orders" />
         </div>
 
         <div className="content-card">
           <div className="card-header">
-            <div>
-              <h2>Sales Transactions</h2>
-              <p>Complete sales history</p>
-            </div>
+            <div><h2>Sales Transactions</h2><p>Available sales history</p></div>
           </div>
-
-          {salesList.length > 0 ? (
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Order ID</th>
-                    <th>Customer</th>
-                    <th>Product</th>
-                    <th>Amount</th>
-                    <th>Status</th>
-                    <th>Date</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {salesList.map((sale, index) => (
-                    <tr
-                      key={
-                        sale.id ??
-                        sale.order_id ??
-                        index
-                      }
-                    >
-                      <td>
-                        <strong>
-                          {sale.order_id ||
-                            sale.id ||
-                            "N/A"}
-                        </strong>
-                      </td>
-
-                      <td>{getOrderCustomer(sale)}</td>
-
-                      <td>{getOrderProduct(sale)}</td>
-
-                      <td>
-                        {formatCurrency(
-                          sale.amount ??
-                            sale.total ??
-                            sale.revenue ??
-                            0
-                        )}
-                      </td>
-
-                      <td>
-                        <span
-                          className={getStatusClass(
-                            sale.status
-                          )}
-                        >
-                          {sale.status || "Unknown"}
-                        </span>
-                      </td>
-
-                      <td>
-                        {sale.order_date
-                          ? new Date(
-                              sale.order_date
-                            ).toLocaleDateString(
-                              "en-IN"
-                            )
-                          : "N/A"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="empty-state">
-              No sales data available.
-            </div>
-          )}
+          <DataTable
+            rows={salesList}
+            emptyMessage="No sales transactions are available."
+            columns={recentOrderColumns}
+          />
         </div>
       </div>
     );
@@ -1387,217 +1005,55 @@ function App() {
   function renderProducts() {
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Products</h1>
-            <p>
-              Monitor product performance, pricing and
-              inventory.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Products"
+          description="Review product details, pricing, and inventory levels."
+        />
 
         <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Total Products
-              </span>
-              <h2>
-                {formatNumber(productList.length)}
-              </h2>
-              <p>Products in catalog</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Inventory Units
-              </span>
-              <h2>
-                {formatNumber(totalInventory)}
-              </h2>
-              <p>Total available units</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Low Stock</span>
-              <h2>
-                {formatNumber(lowStockCount)}
-              </h2>
-              <p>Products needing attention</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Inventory Value
-              </span>
-              <h2>
-                {formatCurrency(inventoryValue)}
-              </h2>
-              <p>Estimated current value</p>
-            </div>
-          </div>
+          <StatCard label="Total Products" value={formatNumber(productList.length)} description="Products in catalog" />
+          <StatCard label="Inventory Units" value={formatNumber(totalInventory)} description="Units recorded in stock" />
+          <StatCard label="Low Stock" value={formatNumber(lowStockCount)} description="Products requiring review" />
+          <StatCard label="Inventory Value" value={formatCurrency(inventoryValue)} description="Estimated value of current stock" />
         </div>
 
         <div className="content-card">
           <div className="card-header">
-            <div>
-              <h2>Product Inventory</h2>
-              <p>
-                Current product and stock information
-              </p>
-            </div>
+            <div><h2>Product Inventory</h2><p>Product and stock information</p></div>
           </div>
-
-          {productList.length > 0 ? (
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>Product</th>
-                    <th>Category</th>
-                    <th>Price</th>
-                    <th>Stock</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {productList.map(
-                    (product, index) => {
-                      const stock = Number(
-                        product.stock ?? 0
-                      );
-
-                      return (
-                        <tr
-                          key={
-                            product.id ??
-                            product.product_id ??
-                            index
-                          }
-                        >
-                          <td>
-                            {product.id ?? index + 1}
-                          </td>
-
-                          <td>
-                            <strong>
-                              {getProductName(product)}
-                            </strong>
-                          </td>
-
-                          <td>
-                            {product.category || "N/A"}
-                          </td>
-
-                          <td>
-                            {formatCurrency(
-                              product.price
-                            )}
-                          </td>
-
-                          <td>{formatNumber(stock)}</td>
-
-                          <td>
-                            {stock <= 10 ? (
-                              <span className="status pending">
-                                Low Stock
-                              </span>
-                            ) : (
-                              <span className="status completed">
-                                Healthy
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    }
-                  )}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="empty-state">
-              No products available.
-            </div>
-          )}
+          <DataTable
+            rows={productList}
+            emptyMessage="No products are available from the backend."
+            columns={[
+              { key: "id", label: "ID", render: (row, index) => row.id ?? row.product_id ?? index + 1 },
+              { key: "name", label: "Product", render: (row) => <strong>{getProductName(row)}</strong> },
+              { key: "category", label: "Category", render: (row) => row.category || "N/A" },
+              { key: "price", label: "Price", render: (row) => formatCurrency(row.price ?? row.unit_price) },
+              { key: "stock", label: "Stock", render: (row) => formatNumber(row.stock ?? row.quantity) },
+              {
+                key: "status",
+                label: "Status",
+                render: (row) =>
+                  toNumber(row.stock ?? row.quantity) <= 10
+                    ? <span className="status pending">Low Stock</span>
+                    : <span className="status completed">Healthy</span>,
+              },
+            ]}
+          />
         </div>
 
         {productPerformanceList.length > 0 && (
           <div className="content-card">
-            <div className="card-header">
-              <div>
-                <h2>Product Performance</h2>
-                <p>
-                  Sales performance by product
-                </p>
-              </div>
-            </div>
-
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Product</th>
-                    <th>Sales</th>
-                    <th>Revenue</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {productPerformanceList.map(
-                    (product, index) => (
-                      <tr
-                        key={
-                          product.id ??
-                          product.product ??
-                          index
-                        }
-                      >
-                        <td>
-                          <strong>
-                            {getProductName(product)}
-                          </strong>
-                        </td>
-
-                        <td>
-                          {formatNumber(
-                            product.sales ??
-                              product.total_sales ??
-                              0
-                          )}
-                        </td>
-
-                        <td>
-                          {formatCurrency(
-                            product.revenue ??
-                              product.total_revenue ??
-                              0
-                          )}
-                        </td>
-
-                        <td>
-                          {product.status || "N/A"}
-                        </td>
-                      </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <div className="card-header"><h2>Product Performance</h2></div>
+            <DataTable
+              rows={productPerformanceList}
+              columns={[
+                { key: "product", label: "Product", render: (row) => getProductName(row) },
+                { key: "sales", label: "Sales", render: (row) => formatNumber(row.sales ?? row.total_sales) },
+                { key: "revenue", label: "Revenue", render: (row) => formatCurrency(row.revenue ?? row.total_revenue) },
+                { key: "status", label: "Status", render: (row) => row.status || "N/A" },
+              ]}
+            />
           </div>
         )}
       </div>
@@ -1605,257 +1061,119 @@ function App() {
   }
 
   function renderAIInsights() {
-    const backendInsights = Array.isArray(
-      aiInsights.insights
-    )
-      ? aiInsights.insights
-      : Array.isArray(aiInsights.ai_insights)
-        ? aiInsights.ai_insights
-        : Array.isArray(dashboard.ai_insights)
-          ? dashboard.ai_insights
-          : [];
+    const hasBackendInsights = backendInsights.length > 0;
 
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>AI Insights</h1>
-            <p>
-              AI-powered analysis to help understand
-              business performance and opportunities.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="AI Insights"
+          description="Understand business signals, operational risks, and recommended actions."
+        />
 
         <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Revenue</span>
-              <h2>
-                {formatCurrency(dashboardRevenue)}
-              </h2>
-              <p>Realized business revenue</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Completion Rate
-              </span>
-              <h2>
-                {formatPercentage(aiCompletionRate)}
-              </h2>
-              <p>Completed order ratio</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">
-                Pending Orders
-              </span>
-              <h2>
-                {formatNumber(aiPendingOrders)}
-              </h2>
-              <p>Orders requiring attention</p>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-card-accent"></div>
-            <div className="stat-card-content">
-              <span className="stat-label">Low Stock</span>
-              <h2>
-                {formatNumber(lowStockCount)}
-              </h2>
-              <p>Products requiring monitoring</p>
-            </div>
-          </div>
+          <StatCard label="Revenue" value={formatCurrency(dashboardRevenue)} description="Reported business revenue" />
+          <StatCard label="Completion Rate" value={formatPercentage(aiCompletionRate)} description="Completed orders divided by total orders" />
+          <StatCard label="Pending Orders" value={formatNumber(aiPendingOrders)} description="Orders requiring review" />
+          <StatCard label="Low Stock" value={formatNumber(lowStockCount)} description="Products at or below 10 units" />
         </div>
 
         <div className="content-card">
           <div className="card-header">
             <div>
               <h2>Business Intelligence</h2>
-              <p>
-                Key insights derived from your current
-                business data
-              </p>
+              <p>Rule-based observations from current business metrics</p>
             </div>
           </div>
 
           <div className="ai-insights-grid">
-            <div className="ai-insight-card">
-              <h3>Revenue Performance</h3>
-              <p>
-                Your current realized revenue is{" "}
-                <strong>
-                  {formatCurrency(dashboardRevenue)}
-                </strong>
-                .
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Order Completion</h3>
-              <p>
-                The business has completed{" "}
-                <strong>
-                  {formatNumber(aiCompletedOrders)}
-                </strong>{" "}
-                out of{" "}
-                <strong>
-                  {formatNumber(aiTotalOrders)}
-                </strong>{" "}
-                recorded orders.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Pending Revenue Opportunity</h3>
-              <p>
-                There are{" "}
-                <strong>
-                  {formatNumber(aiPendingOrders)}
-                </strong>{" "}
-                pending order(s). Converting pending
-                orders can improve realized revenue.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Inventory Risk</h3>
-              <p>
-                {lowStockCount > 0
-                  ? `${lowStockCount} product(s) are currently below the healthy stock threshold.`
-                  : "No products are currently below the healthy stock threshold."}
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Customer Base</h3>
-              <p>
-                The platform currently tracks{" "}
-                <strong>
-                  {formatNumber(dashboardCustomers)}
-                </strong>{" "}
-                customers.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Inventory Value</h3>
-              <p>
-                The estimated value of current inventory
-                is{" "}
-                <strong>
-                  {formatCurrency(inventoryValue)}
-                </strong>
-                .
-              </p>
-            </div>
+            <InsightCard title="Revenue Performance">
+              Reported revenue is {formatCurrency(dashboardRevenue)}. Compare it against
+              previous periods before concluding whether revenue is growing.
+            </InsightCard>
+            <InsightCard title="Order Completion">
+              {formatNumber(aiCompletedOrders)} of {formatNumber(aiTotalOrders)} recorded
+              orders are completed. This calculation depends on the data available to the frontend.
+            </InsightCard>
+            <InsightCard title="Pending Orders">
+              {aiPendingOrders > 0
+                ? `Review the ${formatNumber(aiPendingOrders)} pending order(s) to identify processing delays.`
+                : "No pending orders were reported in the currently loaded data."}
+            </InsightCard>
+            <InsightCard title="Inventory Risk">
+              {lowStockCount > 0
+                ? `${formatNumber(lowStockCount)} product(s) may need restocking. Confirm demand and supplier lead times first.`
+                : "No low-stock products were detected in the currently loaded product data."}
+            </InsightCard>
+            <InsightCard title="Customer Base">
+              The platform currently reports {formatNumber(dashboardCustomers)} customer(s).
+              Track repeat purchases and customer spending to understand retention.
+            </InsightCard>
+            <InsightCard title="Inventory Value">
+              The estimated current inventory value is {formatCurrency(inventoryValue)}.
+              This estimate uses backend values when provided, otherwise price multiplied by stock.
+            </InsightCard>
           </div>
         </div>
-
-        {backendInsights.length > 0 && (
-          <div className="content-card">
-            <div className="card-header">
-              <div>
-                <h2>Backend AI Insights</h2>
-                <p>
-                  Insights returned directly by the
-                  analytics backend
-                </p>
-              </div>
-            </div>
-
-            <div className="ai-insights-grid">
-              {backendInsights.map(
-                (insight, index) => (
-                  <div
-                    className="ai-insight-card"
-                    key={index}
-                  >
-                    <h3>
-                      {insight.title ||
-                        `Insight ${index + 1}`}
-                    </h3>
-
-                    <p>
-                      {insight.message ||
-                        insight.description ||
-                        insight.text ||
-                        "No additional information available."}
-                    </p>
-                  </div>
-                )
-              )}
-            </div>
-          </div>
-        )}
 
         <div className="content-card">
           <div className="card-header">
             <div>
               <h2>Recommended Actions</h2>
-              <p>
-                Suggested actions based on current
-                business conditions
-              </p>
+              <p>Practical actions suggested from the available metrics</p>
             </div>
           </div>
 
           <div className="ai-insights-grid">
             {lowStockCount > 0 && (
-              <div className="ai-insight-card">
-                <h3>Restock Low Inventory</h3>
-                <p>
-                  Review the{" "}
-                  <strong>
-                    {formatNumber(lowStockCount)}
-                  </strong>{" "}
-                  low-stock product(s) and consider
-                  replenishing them.
-                </p>
-              </div>
+              <InsightCard title="Review Low Stock">
+                Inspect the low-stock list and decide which products need replenishment.
+              </InsightCard>
             )}
-
             {aiPendingOrders > 0 && (
-              <div className="ai-insight-card">
-                <h3>Review Pending Orders</h3>
-                <p>
-                  Follow up on{" "}
-                  <strong>
-                    {formatNumber(aiPendingOrders)}
-                  </strong>{" "}
-                  pending order(s) to reduce delays and
-                  improve revenue realization.
-                </p>
-              </div>
+              <InsightCard title="Follow Up on Pending Orders">
+                Check pending orders for payment, fulfilment, or customer communication issues.
+              </InsightCard>
             )}
+            <InsightCard title="Monitor Revenue">
+              Compare monthly revenue with prior periods and investigate unusual changes.
+            </InsightCard>
+            <InsightCard title="Review Product Performance">
+              Compare product sales and revenue to understand which products contribute most.
+            </InsightCard>
+          </div>
+        </div>
 
-            <div className="ai-insight-card">
-              <h3>Monitor Revenue</h3>
-              <p>
-                Continue tracking monthly revenue trends
-                to identify high-performing periods and
-                products.
-              </p>
-            </div>
-
-            <div className="ai-insight-card">
-              <h3>Analyze Product Performance</h3>
-              <p>
-                Compare product sales and revenue regularly
-                to identify products that contribute most
-                to business growth.
-              </p>
+        <div className="content-card">
+          <div className="card-header">
+            <div>
+              <h2>Backend-Provided Insights</h2>
+              <p>Messages returned by the /ai-insights API</p>
             </div>
           </div>
+
+          {hasBackendInsights ? (
+            <div className="ai-insights-grid">
+              {backendInsights.map((insight, index) => {
+                const item = typeof insight === "string"
+                  ? { message: insight }
+                  : asObject(insight);
+
+                return (
+                  <InsightCard
+                    key={item.id ?? index}
+                    title={item.title || item.category || `Backend Insight ${index + 1}`}
+                  >
+                    {item.message || item.description || item.text || JSON.stringify(item)}
+                  </InsightCard>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty-state">
+              The backend did not return any separate insight messages. The metric-based
+              observations above are frontend rules, not proof of an AI model response.
+            </div>
+          )}
         </div>
       </div>
     );
@@ -1864,56 +1182,28 @@ function App() {
   function renderSettings() {
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Settings</h1>
-            <p>
-              Manage your dashboard and application
-              configuration.
-            </p>
-          </div>
-        </div>
+        <PageHeader
+          title="Settings"
+          description="Review the current application configuration."
+        />
 
         <div className="content-card">
-          <div className="card-header">
-            <div>
-              <h2>Application Information</h2>
-              <p>Current platform configuration</p>
-            </div>
-          </div>
-
+          <div className="card-header"><h2>Application Information</h2></div>
           <div className="summary-list">
-            <div className="summary-row">
-              <span>Platform</span>
-              <strong>
-                AI Business Intelligence
-              </strong>
-            </div>
-
-            <div className="summary-row">
-              <span>Frontend</span>
-              <strong>React + Vite</strong>
-            </div>
-
-            <div className="summary-row">
-              <span>Backend</span>
-              <strong>FastAPI</strong>
-            </div>
-
-            <div className="summary-row">
-              <span>Database</span>
-              <strong>PostgreSQL / SQLite</strong>
-            </div>
-
-            <div className="summary-row">
-              <span>Analytics</span>
-              <strong>Business Intelligence</strong>
-            </div>
-
-            <div className="summary-row">
-              <span>AI Layer</span>
-              <strong>AI Business Insights</strong>
-            </div>
+            <SummaryRow label="Platform" value="AI Business Intelligence" />
+            <SummaryRow label="Frontend" value="React + Vite" />
+            <SummaryRow label="Backend" value="FastAPI" />
+            <SummaryRow label="Database" value="Configured by backend" />
+            <SummaryRow label="Charts" value="Recharts" />
+            <SummaryRow label="API URL" value={API_URL} />
+            <SummaryRow
+              label="Connection"
+              value={backendConnected ? "Connected" : "Disconnected"}
+            />
+            <SummaryRow
+              label="Last successful data refresh"
+              value={lastUpdated ? lastUpdated.toLocaleString("en-IN") : "Not available"}
+            />
           </div>
         </div>
       </div>
@@ -1923,29 +1213,20 @@ function App() {
   function renderLogout() {
     return (
       <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h1>Logout</h1>
-            <p>
-              You are ready to leave the dashboard.
-            </p>
-          </div>
-        </div>
-
+        <PageHeader
+          title="Logout"
+          description="Return to the dashboard."
+        />
         <div className="content-card">
           <div className="logout-content">
-            <h2>Logout</h2>
-
+            <h2>Demo Application</h2>
             <p>
-              This demo dashboard does not currently
-              have authentication enabled.
+              Authentication is not implemented in this demo. This button only returns
+              you to the dashboard; it does not log out of an account.
             </p>
-
             <button
               className="primary-button"
-              onClick={() =>
-                setActivePage("Dashboard")
-              }
+              onClick={() => setActivePage("Dashboard")}
             >
               Return to Dashboard
             </button>
@@ -1957,32 +1238,15 @@ function App() {
 
   function renderActivePage() {
     switch (activePage) {
-      case "Dashboard":
-        return renderDashboard();
-
-      case "Analytics":
-        return renderAnalytics();
-
-      case "Customers":
-        return renderCustomers();
-
-      case "Sales":
-        return renderSales();
-
-      case "Products":
-        return renderProducts();
-
-      case "AI Insights":
-        return renderAIInsights();
-
-      case "Settings":
-        return renderSettings();
-
-      case "Logout":
-        return renderLogout();
-
-      default:
-        return renderDashboard();
+      case "Dashboard": return renderDashboard();
+      case "Analytics": return renderAnalytics();
+      case "Customers": return renderCustomers();
+      case "Sales": return renderSales();
+      case "Products": return renderProducts();
+      case "AI Insights": return renderAIInsights();
+      case "Settings": return renderSettings();
+      case "Logout": return renderLogout();
+      default: return renderDashboard();
     }
   }
 
@@ -1995,24 +1259,18 @@ function App() {
             <span>Intelligence</span>
           </div>
         </aside>
-
         <main className="main-content">
           <div className="loading-screen">
-            <div className="loading-spinner"></div>
-
+            <div className="loading-spinner" />
             <h2>Loading Dashboard</h2>
-
-            <p>
-              Connecting to your business intelligence
-              platform...
-            </p>
+            <p>Connecting to your business intelligence platform...</p>
           </div>
         </main>
       </div>
     );
   }
 
-  if (error) {
+  if (connectionError) {
     return (
       <div className="app">
         <aside className="sidebar">
@@ -2021,20 +1279,18 @@ function App() {
             <span>Intelligence</span>
           </div>
         </aside>
-
         <main className="main-content">
           <div className="error-screen">
             <div className="error-icon">!</div>
-
             <h2>Backend Connection Error</h2>
-
-            <p>{error}</p>
-
+            <p>{connectionError}</p>
+            <p>Confirm that FastAPI is running at {API_URL}.</p>
             <button
               className="primary-button"
               onClick={loadAllData}
+              disabled={refreshing}
             >
-              Retry Connection
+              {refreshing ? "Connecting..." : "Retry Connection"}
             </button>
           </div>
         </main>
@@ -2051,109 +1307,15 @@ function App() {
         </div>
 
         <nav className="sidebar-nav">
-          <button
-            className={
-              activePage === "Dashboard"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Dashboard")
-            }
-          >
-            Dashboard
-          </button>
-
-          <button
-            className={
-              activePage === "Analytics"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Analytics")
-            }
-          >
-            Analytics
-          </button>
-
-          <button
-            className={
-              activePage === "Customers"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Customers")
-            }
-          >
-            Customers
-          </button>
-
-          <button
-            className={
-              activePage === "Sales"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Sales")
-            }
-          >
-            Sales
-          </button>
-
-          <button
-            className={
-              activePage === "Products"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Products")
-            }
-          >
-            Products
-          </button>
-
-          <button
-            className={
-              activePage === "AI Insights"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("AI Insights")
-            }
-          >
-            AI Insights
-          </button>
-
-          <button
-            className={
-              activePage === "Settings"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Settings")
-            }
-          >
-            Settings
-          </button>
-
-          <button
-            className={
-              activePage === "Logout"
-                ? "nav-item active"
-                : "nav-item"
-            }
-            onClick={() =>
-              setActivePage("Logout")
-            }
-          >
-            Logout
-          </button>
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item}
+              className={activePage === item ? "nav-item active" : "nav-item"}
+              onClick={() => setActivePage(item)}
+            >
+              {item}
+            </button>
+          ))}
         </nav>
       </aside>
 
@@ -2165,15 +1327,31 @@ function App() {
 
           <div className="topbar-right">
             <div className="connection-status">
-              <span className="connection-dot"></span>
-
-              <span>Backend Connected</span>
+              <span
+                className="connection-dot"
+                style={{
+                  background: backendConnected ? "#16a34a" : "#dc2626",
+                }}
+              />
+              <span>
+                {backendConnected ? "Backend Connected" : "Backend Disconnected"}
+              </span>
             </div>
+
+            <button
+              className="primary-button"
+              onClick={loadAllData}
+              disabled={refreshing}
+              title="Reload data from the backend"
+            >
+              {refreshing ? "Refreshing..." : "Refresh Data"}
+            </button>
           </div>
         </header>
 
         {apiErrors.length > 0 && (
           <div
+            role="alert"
             style={{
               margin: "15px 20px 0",
               padding: "12px 16px",
@@ -2184,29 +1362,29 @@ function App() {
               fontSize: "14px",
             }}
           >
-            <strong>
-              Some data could not be loaded:
-            </strong>
-
-            <ul
-              style={{
-                margin: "8px 0 0 20px",
-              }}
-            >
-              {apiErrors.map((item, index) => (
-                <li key={index}>{item}</li>
+            <strong>Some data could not be loaded:</strong>
+            <ul style={{ margin: "8px 0 0 20px" }}>
+              {apiErrors.map((item) => (
+                <li key={item.endpoint}>
+                  <strong>{item.name} ({item.endpoint}):</strong> {item.message}
+                </li>
               ))}
             </ul>
+            <p style={{ marginTop: "8px" }}>
+              Other pages may still display successfully loaded data.
+            </p>
+          </div>
+        )}
 
-            <button
-              className="primary-button"
-              style={{
-                marginTop: "10px",
-              }}
-              onClick={loadAllData}
-            >
-              Retry Data Loading
-            </button>
+        {lastUpdated && (
+          <div
+            style={{
+              margin: "8px 20px 0",
+              color: "#64748b",
+              fontSize: "12px",
+            }}
+          >
+            Last refreshed: {lastUpdated.toLocaleString("en-IN")}
           </div>
         )}
 
