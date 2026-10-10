@@ -20,6 +20,7 @@ app = FastAPI(
 # CORS Configuration
 # ---------------------------------------------------------
 
+```python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -27,7 +28,7 @@ app.add_middleware(
         "http://localhost:5174",
         "http://localhost:5175",
         "http://localhost:5176",
-        "https://your-project.vercel.app",
+        "https://ai-business-intelligence-platform-plum.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
