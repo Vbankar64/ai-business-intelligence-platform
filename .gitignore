@@ -23,3 +23,17 @@ Thumbs.db
 # Secrets
 *.pem
 *.key
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python virtual environments
+.venv/
+
+# Environment variable variants
+.env.*
+
+# Temporary backups
+App_backup.jsx
