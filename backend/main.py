@@ -20,7 +20,7 @@ app = FastAPI(
 # CORS Configuration
 # ---------------------------------------------------------
 
-```python
+python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
