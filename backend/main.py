@@ -1,25 +1,26 @@
-from fastapi import FastAPI
+```python
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from database.database import SessionLocal
 from database import models
 
 
-# ---------------------------------------------------------
+# =========================================================
 # FastAPI Application
-# ---------------------------------------------------------
+# =========================================================
 
 app = FastAPI(
     title="AI Business Intelligence Platform",
     description="Backend API for business analytics and AI-powered insights",
-    version="1.0.0"
+    version="1.2.0",
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # CORS Configuration
-# ---------------------------------------------------------
-
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,462 +37,435 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
+# Shared Business Calculation Helpers
+# =========================================================
+
+def order_status(order):
+    """Return a normalized order status."""
+    return str(order.status or "").strip().lower()
+
+
+def get_order_summary(orders):
+    """Calculate consistent business metrics from order records."""
+
+    completed = [
+        order for order in orders
+        if order_status(order) == "completed"
+    ]
+
+    pending = [
+        order for order in orders
+        if order_status(order) == "pending"
+    ]
+
+    cancelled = [
+        order for order in orders
+        if order_status(order) == "cancelled"
+    ]
+
+    completed_revenue = sum(
+        order.amount or 0 for order in completed
+    )
+
+    pending_sales = sum(
+        order.amount or 0 for order in pending
+    )
+
+    cancelled_sales = sum(
+        order.amount or 0 for order in cancelled
+    )
+
+    total_order_value = sum(
+        order.amount or 0 for order in orders
+    )
+
+    average_order_value = (
+        completed_revenue / len(completed)
+        if completed
+        else 0
+    )
+
+    return {
+        "total_revenue": completed_revenue,
+        "total_sales": completed_revenue,
+        "pending_sales": pending_sales,
+        "cancelled_sales": cancelled_sales,
+        "total_order_value": total_order_value,
+        "total_orders": len(orders),
+        "completed_orders": len(completed),
+        "pending_orders": len(pending),
+        "cancelled_orders": len(cancelled),
+        "average_order_value": round(average_order_value, 2),
+    }
+
+
+def get_monthly_revenue(orders):
+    """Calculate monthly revenue using completed orders only."""
+
+    months = [
+        "Jan", "Feb", "Mar", "Apr",
+        "May", "Jun", "Jul", "Aug",
+        "Sep", "Oct", "Nov", "Dec",
+    ]
+
+    monthly_totals = {month: 0 for month in months}
+
+    for order in orders:
+        if order_status(order) != "completed":
+            continue
+
+        if not order.order_date:
+            continue
+
+        month = order.order_date.strftime("%b")
+        monthly_totals[month] += order.amount or 0
+
+    return [
+        {
+            "month": month,
+            "revenue": monthly_totals[month],
+        }
+        for month in months
+    ]
+
+
+def serialize_order(order):
+    """Convert an order into a JSON-compatible dictionary."""
+
+    return {
+        "id": order.id,
+        "order_id": order.order_id,
+        "customer": order.customer,
+        "product": order.product,
+        "amount": order.amount or 0,
+        "status": order.status,
+        "order_date": (
+            order.order_date.strftime("%Y-%m-%d")
+            if order.order_date
+            else None
+        ),
+    }
+
+
+def get_low_stock_products(products):
+    """Find products with fewer than 10 units in stock."""
+
+    return [
+        product for product in products
+        if (product.stock or 0) < 10
+    ]
+
+
+def get_sorted_orders(orders):
+    """Sort orders by date, newest first."""
+
+    return sorted(
+        orders,
+        key=lambda order: (
+            order.order_date is not None,
+            order.order_date,
+        ),
+        reverse=True,
+    )
+
+
+# =========================================================
 # Root Endpoint
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/")
 def root():
     return {
         "message": "AI Business Intelligence Platform API",
         "status": "running",
-        "database": "PostgreSQL"
+        "database": "PostgreSQL",
+        "version": "1.2.0",
     }
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Health Check
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "database": "PostgreSQL"
-    }
-
-
-# ---------------------------------------------------------
-# Dashboard
-# ---------------------------------------------------------
-
-@app.get("/dashboard")
-def get_dashboard():
+    """Verify that the API can execute a database query."""
 
     db = SessionLocal()
 
     try:
+        db.execute(text("SELECT 1"))
 
+        return {
+            "status": "healthy",
+            "database": "PostgreSQL",
+        }
+
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "unhealthy",
+                "database": "connection_failed",
+            },
+        )
+
+    finally:
+        db.close()
+
+
+# =========================================================
+# Dashboard
+# =========================================================
+
+@app.get("/dashboard")
+def get_dashboard():
+    db = SessionLocal()
+
+    try:
         customers = db.query(models.Customer).all()
         products = db.query(models.Product).all()
         orders = db.query(models.Order).all()
 
-        # ---------------------------------------------
-        # Basic calculations
-        # ---------------------------------------------
+        summary = get_order_summary(orders)
+        low_stock_products = get_low_stock_products(products)
+        recent_orders = get_sorted_orders(orders)
 
-        total_customers = len(customers)
-        total_orders = len(orders)
-
-        total_revenue = sum(
-            order.amount
-            for order in orders
-            if order.status != "Cancelled"
-        )
-
-        completed_orders = sum(
-            1 for order in orders
-            if order.status == "Completed"
-        )
-
-        pending_orders = sum(
-            1 for order in orders
-            if order.status == "Pending"
-        )
-
-        cancelled_orders = sum(
-            1 for order in orders
-            if order.status == "Cancelled"
-        )
-
-        # Conversion rate
+        # This is only a proxy metric, not a true website
+        # conversion rate. Visitor or lead data is required
+        # to calculate a real conversion rate.
         conversion_rate = (
-            (completed_orders / total_customers) * 100
-            if total_customers > 0
+            summary["completed_orders"] / len(customers) * 100
+            if customers
             else 0
         )
 
-        # ---------------------------------------------
-        # Monthly revenue
-        # ---------------------------------------------
-
-        monthly_revenue = {}
-
-        for order in orders:
-
-            if order.status == "Cancelled":
-                continue
-
-            month = order.order_date.strftime("%b")
-
-            if month not in monthly_revenue:
-                monthly_revenue[month] = 0
-
-            monthly_revenue[month] += order.amount
-
-        months = [
-            "Jan", "Feb", "Mar", "Apr",
-            "May", "Jun", "Jul", "Aug",
-            "Sep", "Oct", "Nov", "Dec"
-        ]
-
-        revenue_overview = [
-            {
-                "month": month,
-                "revenue": monthly_revenue.get(month, 0)
-            }
-            for month in months
-        ]
-
-        # ---------------------------------------------
-        # Recent orders
-        # ---------------------------------------------
-
-        recent_orders = sorted(
-            orders,
-            key=lambda x: x.order_date,
-            reverse=True
-        )
-
-        recent_orders_data = [
-            {
-                "id": order.id,
-                "order_id": order.order_id,
-                "customer": order.customer,
-                "product": order.product,
-                "amount": order.amount,
-                "status": order.status,
-                "order_date": order.order_date.strftime("%Y-%m-%d")
-            }
-            for order in recent_orders
-        ]
-
-        # ---------------------------------------------
-        # Low stock products
-        # ---------------------------------------------
-
-        low_stock_products = [
-            product
-            for product in products
-            if product.stock < 10
-        ]
-
-        # ---------------------------------------------
-        # AI / Business insights
-        # ---------------------------------------------
-
         ai_insights = [
             {
-                "title": "Revenue Insight",
-                "message": f"Total revenue is ₹{total_revenue:,.0f}."
+                "title": "Completed Revenue",
+                "message": (
+                    f"Completed revenue is "
+                    f"₹{summary['total_revenue']:,.2f}."
+                ),
+            },
+            {
+                "title": "Pending Sales",
+                "message": (
+                    f"₹{summary['pending_sales']:,.2f} is awaiting "
+                    f"completion across {summary['pending_orders']} "
+                    "pending order(s)."
+                ),
             },
             {
                 "title": "Inventory Alert",
-                "message": f"{len(low_stock_products)} product(s) have low stock."
-            }
+                "message": (
+                    f"{len(low_stock_products)} product(s) "
+                    "have low stock."
+                ),
+            },
         ]
 
         return {
-            "total_revenue": total_revenue,
-            "total_customers": total_customers,
-            "total_orders": total_orders,
+            "total_revenue": summary["total_revenue"],
+            "total_customers": len(customers),
+            "total_orders": summary["total_orders"],
             "conversion_rate": round(conversion_rate, 2),
-            "revenue_overview": revenue_overview,
-            "recent_orders": recent_orders_data,
+            "revenue_overview": get_monthly_revenue(orders),
+            "recent_orders": [
+                serialize_order(order)
+                for order in recent_orders[:10]
+            ],
             "low_stock_count": len(low_stock_products),
-            "ai_insights": ai_insights
+            "ai_insights": ai_insights,
+            "pending_sales": summary["pending_sales"],
+            "cancelled_sales": summary["cancelled_sales"],
+            "total_order_value": summary["total_order_value"],
+            "completed_orders": summary["completed_orders"],
+            "pending_orders": summary["pending_orders"],
+            "cancelled_orders": summary["cancelled_orders"],
         }
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Analytics
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/analytics")
 def get_analytics():
-
     db = SessionLocal()
 
     try:
-
         customers = db.query(models.Customer).all()
         products = db.query(models.Product).all()
         orders = db.query(models.Order).all()
 
-        # ---------------------------------------------
-        # Basic metrics
-        # ---------------------------------------------
-
-        total_customers = len(customers)
-        total_orders = len(orders)
-
-        total_revenue = sum(
-            order.amount
-            for order in orders
-            if order.status != "Cancelled"
-        )
-
-        average_order_value = (
-            total_revenue / total_orders
-            if total_orders > 0
-            else 0
-        )
-
-        completed_orders = sum(
-            1 for order in orders
-            if order.status == "Completed"
-        )
-
-        pending_orders = sum(
-            1 for order in orders
-            if order.status == "Pending"
-        )
-
-        cancelled_orders = sum(
-            1 for order in orders
-            if order.status == "Cancelled"
-        )
-
-        # ---------------------------------------------
-        # Monthly revenue
-        # ---------------------------------------------
-
-        monthly_revenue = {}
-
-        for order in orders:
-
-            if order.status == "Cancelled":
-                continue
-
-            month = order.order_date.strftime("%b")
-
-            if month not in monthly_revenue:
-                monthly_revenue[month] = 0
-
-            monthly_revenue[month] += order.amount
-
-        months = [
-            "Jan", "Feb", "Mar", "Apr",
-            "May", "Jun", "Jul", "Aug",
-            "Sep", "Oct", "Nov", "Dec"
-        ]
-
-        monthly_revenue_data = [
-            {
-                "month": month,
-                "revenue": monthly_revenue.get(month, 0)
-            }
-            for month in months
-        ]
-
-        # ---------------------------------------------
-        # FIXED PRODUCT PERFORMANCE
-        # ---------------------------------------------
+        summary = get_order_summary(orders)
+        low_stock_products = get_low_stock_products(products)
 
         product_performance = []
 
         for product in products:
-
             matching_orders = [
-                order
-                for order in orders
-                if order.product == product.name
-                and order.status != "Cancelled"
+                order for order in orders
+                if (
+                    order.product == product.name
+                    and order_status(order) == "completed"
+                )
             ]
 
-            sales_count = len(matching_orders)
-
-            revenue = sum(
-                order.amount
-                for order in matching_orders
-            )
-
-            product_performance.append(
-                {
-                    "product": product.name,
-                    "sales": sales_count,
-                    "revenue": revenue,
-                    "status": (
-                        "Low Stock"
-                        if product.stock < 10
-                        else "In Stock"
-                    )
-                }
-            )
-
-        # ---------------------------------------------
-        # Low stock
-        # ---------------------------------------------
-
-        low_stock_products = [
-            {
-                "name": product.name,
-                "stock": product.stock
-            }
-            for product in products
-            if product.stock < 10
-        ]
+            product_performance.append({
+                "product": product.name,
+                "sales": len(matching_orders),
+                "revenue": sum(
+                    order.amount or 0
+                    for order in matching_orders
+                ),
+                "status": (
+                    "Low Stock"
+                    if (product.stock or 0) < 10
+                    else "In Stock"
+                ),
+            })
 
         return {
-            "total_revenue": total_revenue,
-            "total_orders": total_orders,
-            "total_customers": total_customers,
-            "average_order_value": round(average_order_value, 2),
-
+            "total_revenue": summary["total_revenue"],
+            "total_orders": summary["total_orders"],
+            "total_customers": len(customers),
+            "average_order_value": summary["average_order_value"],
             "order_status": {
-                "completed": completed_orders,
-                "pending": pending_orders,
-                "cancelled": cancelled_orders
+                "completed": summary["completed_orders"],
+                "pending": summary["pending_orders"],
+                "cancelled": summary["cancelled_orders"],
             },
-
-            "monthly_revenue": monthly_revenue_data,
-
+            "monthly_revenue": get_monthly_revenue(orders),
             "product_performance": product_performance,
-
-            "low_stock_products": low_stock_products
+            "low_stock_products": [
+                {
+                    "name": product.name,
+                    "stock": product.stock or 0,
+                }
+                for product in low_stock_products
+            ],
+            "pending_sales": summary["pending_sales"],
+            "cancelled_sales": summary["cancelled_sales"],
+            "total_order_value": summary["total_order_value"],
         }
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Customers
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/customers")
 def get_customers():
-
     db = SessionLocal()
 
     try:
-
         customers = db.query(models.Customer).all()
         orders = db.query(models.Order).all()
 
-        total_revenue = sum(
-            order.amount
-            for order in orders
-            if order.status != "Cancelled"
-        )
+        summary = get_order_summary(orders)
 
-        customer_data = []
+        customer_order_counts = {}
+        customer_completed_spending = {}
 
-        for customer in customers:
+        for order in orders:
+            customer_name = order.customer
 
-            customer_data.append(
-                {
-                    "id": customer.id,
-                    "name": customer.name,
-                    "email": customer.email,
-                    "total_orders": customer.total_orders,
-                    "total_spent": customer.total_spent
-                }
+            customer_order_counts[customer_name] = (
+                customer_order_counts.get(customer_name, 0) + 1
             )
+
+            if order_status(order) == "completed":
+                customer_completed_spending[customer_name] = (
+                    customer_completed_spending.get(customer_name, 0)
+                    + (order.amount or 0)
+                )
+
+        customer_data = [
+            {
+                "id": customer.id,
+                "name": customer.name,
+                "email": customer.email,
+                "total_orders": customer_order_counts.get(
+                    customer.name, 0
+                ),
+                "total_spent": customer_completed_spending.get(
+                    customer.name, 0
+                ),
+            }
+            for customer in customers
+        ]
 
         return {
             "total_customers": len(customers),
-            "total_revenue": total_revenue,
-            "customers": customer_data
+            "total_revenue": summary["total_revenue"],
+            "customers": customer_data,
         }
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Sales
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/sales")
 def get_sales():
-
     db = SessionLocal()
 
     try:
-
         orders = db.query(models.Order).all()
-
-        total_sales = sum(
-            order.amount
-            for order in orders
-            if order.status != "Cancelled"
-        )
-
-        completed_orders = sum(
-            1 for order in orders
-            if order.status == "Completed"
-        )
-
-        pending_orders = sum(
-            1 for order in orders
-            if order.status == "Pending"
-        )
-
-        cancelled_orders = sum(
-            1 for order in orders
-            if order.status == "Cancelled"
-        )
-
-        order_data = [
-            {
-                "id": order.id,
-                "order_id": order.order_id,
-                "customer": order.customer,
-                "product": order.product,
-                "amount": order.amount,
-                "status": order.status,
-                "order_date": order.order_date.strftime("%Y-%m-%d")
-            }
-            for order in sorted(
-                orders,
-                key=lambda x: x.order_date,
-                reverse=True
-            )
-        ]
+        summary = get_order_summary(orders)
+        sorted_orders = get_sorted_orders(orders)
 
         return {
-            "total_sales": total_sales,
-            "total_orders": len(orders),
-            "completed_orders": completed_orders,
-            "pending_orders": pending_orders,
-            "cancelled_orders": cancelled_orders,
-            "orders": order_data
+            "total_sales": summary["total_sales"],
+            "total_revenue": summary["total_revenue"],
+            "pending_sales": summary["pending_sales"],
+            "cancelled_sales": summary["cancelled_sales"],
+            "total_order_value": summary["total_order_value"],
+            "total_orders": summary["total_orders"],
+            "completed_orders": summary["completed_orders"],
+            "pending_orders": summary["pending_orders"],
+            "cancelled_orders": summary["cancelled_orders"],
+            "average_order_value": summary["average_order_value"],
+            "orders": [
+                serialize_order(order)
+                for order in sorted_orders
+            ],
         }
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Products
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/products")
 def get_products():
-
     db = SessionLocal()
 
     try:
-
         products = db.query(models.Product).all()
+        low_stock_products = get_low_stock_products(products)
 
         total_inventory = sum(
-            product.stock
-            for product in products
+            product.stock or 0 for product in products
         )
 
-        low_stock_products = [
-            product
-            for product in products
-            if product.stock < 10
-        ]
-
         inventory_value = sum(
-            product.price * product.stock
+            (product.price or 0) * (product.stock or 0)
             for product in products
         )
 
@@ -500,8 +474,8 @@ def get_products():
                 "id": product.id,
                 "name": product.name,
                 "category": product.category,
-                "price": product.price,
-                "stock": product.stock
+                "price": product.price or 0,
+                "stock": product.stock or 0,
             }
             for product in products
         ]
@@ -511,209 +485,130 @@ def get_products():
             "total_inventory": total_inventory,
             "low_stock_products": len(low_stock_products),
             "inventory_value": inventory_value,
-            "products": product_data
+            "products": product_data,
         }
 
     finally:
         db.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # AI Insights
-# ---------------------------------------------------------
+# =========================================================
 
 @app.get("/ai-insights")
 def get_ai_insights():
-
     db = SessionLocal()
 
     try:
-
         customers = db.query(models.Customer).all()
         products = db.query(models.Product).all()
         orders = db.query(models.Order).all()
 
-        # ---------------------------------------------
-        # Revenue
-        # ---------------------------------------------
+        summary = get_order_summary(orders)
+        low_stock_products = get_low_stock_products(products)
 
-        total_revenue = sum(
-            order.amount
-            for order in orders
-            if order.status != "Cancelled"
-        )
-
-        total_orders = len(orders)
-        total_customers = len(customers)
-
-        # ---------------------------------------------
-        # Order status
-        # ---------------------------------------------
-
-        completed_orders = sum(
-            1 for order in orders
-            if order.status == "Completed"
-        )
-
-        pending_orders = sum(
-            1 for order in orders
-            if order.status == "Pending"
-        )
-
-        cancelled_orders = sum(
-            1 for order in orders
-            if order.status == "Cancelled"
-        )
-
-        # ---------------------------------------------
-        # Average Order Value
-        # ---------------------------------------------
-
-        average_order_value = (
-            total_revenue / total_orders
-            if total_orders > 0
-            else 0
-        )
-
-        # ---------------------------------------------
-        # Completion rate
-        # ---------------------------------------------
+        total_orders = summary["total_orders"]
 
         completion_rate = (
-            (completed_orders / total_orders) * 100
-            if total_orders > 0
+            summary["completed_orders"] / total_orders * 100
+            if total_orders
             else 0
         )
 
-        # ---------------------------------------------
-        # Low stock
-        # ---------------------------------------------
-
-        low_stock_products = [
-            product
-            for product in products
-            if product.stock < 10
-        ]
-
-        # ---------------------------------------------
-        # Insights
-        # ---------------------------------------------
-
-        insights = []
-
-        insights.append(
+        insights = [
             {
                 "type": "revenue",
-                "title": "Revenue Performance",
+                "title": "Completed Revenue",
                 "message": (
-                    f"Your business generated "
-                    f"₹{total_revenue:,.0f} "
-                    f"from {total_orders} orders."
-                )
-            }
-        )
-
-        insights.append(
+                    f"Your business has generated "
+                    f"₹{summary['total_revenue']:,.2f} from "
+                    f"{summary['completed_orders']} completed orders."
+                ),
+            },
             {
                 "type": "sales",
                 "title": "Average Order Value",
                 "message": (
-                    f"The average order value is "
-                    f"₹{average_order_value:,.0f}."
-                )
-            }
-        )
-
-        insights.append(
+                    f"The average completed order value is "
+                    f"₹{summary['average_order_value']:,.2f}."
+                ),
+            },
             {
                 "type": "orders",
                 "title": "Order Completion",
                 "message": (
-                    f"{completed_orders} orders are completed, "
-                    f"representing a "
-                    f"{completion_rate:.1f}% completion rate."
-                )
-            }
-        )
+                    f"{summary['completed_orders']} of {total_orders} "
+                    f"orders are completed ({completion_rate:.1f}%)."
+                ),
+            },
+        ]
 
-        if pending_orders > 0:
+        if summary["pending_orders"] > 0:
+            insights.append({
+                "type": "warning",
+                "title": "Pending Orders",
+                "message": (
+                    f"{summary['pending_orders']} pending order(s) "
+                    f"represent ₹{summary['pending_sales']:,.2f}. "
+                    "Review them to determine the next action."
+                ),
+            })
 
-            insights.append(
-                {
-                    "type": "warning",
-                    "title": "Pending Orders",
-                    "message": (
-                        f"There are {pending_orders} "
-                        f"pending orders that may require attention."
-                    )
-                }
-            )
-
-        if cancelled_orders > 0:
-
-            insights.append(
-                {
-                    "type": "warning",
-                    "title": "Cancelled Orders",
-                    "message": (
-                        f"{cancelled_orders} orders "
-                        f"have been cancelled."
-                    )
-                }
-            )
+        if summary["cancelled_orders"] > 0:
+            insights.append({
+                "type": "warning",
+                "title": "Cancelled Orders",
+                "message": (
+                    f"{summary['cancelled_orders']} order(s) totalling "
+                    f"₹{summary['cancelled_sales']:,.2f} were cancelled "
+                    "and are excluded from revenue."
+                ),
+            })
 
         if low_stock_products:
-
             product_names = ", ".join(
-                product.name
-                for product in low_stock_products
+                product.name for product in low_stock_products
             )
 
-            insights.append(
-                {
-                    "type": "inventory",
-                    "title": "Low Stock Alert",
-                    "message": (
-                        "The following products have "
-                        f"low stock: {product_names}."
-                    )
-                }
-            )
-
-        insights.append(
-            {
-                "type": "customers",
-                "title": "Customer Base",
+            insights.append({
+                "type": "inventory",
+                "title": "Low Stock Alert",
                 "message": (
-                    f"Your platform currently has "
-                    f"{total_customers} customers."
-                )
-            }
-        )
+                    f"Review stock levels for: {product_names}."
+                ),
+            })
+
+        insights.append({
+            "type": "customers",
+            "title": "Customer Base",
+            "message": (
+                f"Your platform currently has "
+                f"{len(customers)} customers."
+            ),
+        })
 
         return {
             "summary": {
-                "total_revenue": total_revenue,
-                "total_orders": total_orders,
-                "total_customers": total_customers,
-                "average_order_value": round(
-                    average_order_value,
-                    2
-                ),
-                "completed_orders": completed_orders,
-                "pending_orders": pending_orders,
-                "cancelled_orders": cancelled_orders
+                "total_revenue": summary["total_revenue"],
+                "total_orders": summary["total_orders"],
+                "total_customers": len(customers),
+                "average_order_value": summary["average_order_value"],
+                "completed_orders": summary["completed_orders"],
+                "pending_orders": summary["pending_orders"],
+                "cancelled_orders": summary["cancelled_orders"],
+                "pending_sales": summary["pending_sales"],
+                "cancelled_sales": summary["cancelled_sales"],
+                "total_order_value": summary["total_order_value"],
             },
-
             "insights": insights,
-
             "low_stock_products": [
                 {
                     "name": product.name,
-                    "stock": product.stock
+                    "stock": product.stock or 0,
                 }
                 for product in low_stock_products
-            ]
+            ],
         }
 
     finally:
